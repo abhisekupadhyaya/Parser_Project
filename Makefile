@@ -1,6 +1,7 @@
 build:
 	cd llama && $(MAKE) build
 	cd mongodb && $(MAKE) build
+	cd milvus && $(MAKE) build
 	cd server && $(MAKE) build
 	cd client && $(MAKE) build
 

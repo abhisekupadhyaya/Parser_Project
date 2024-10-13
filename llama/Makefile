@@ -1,4 +1,4 @@
 .PHONY: build
 
 build:
-	docker build -t ollama/ollama:latest .
+	docker build -t ollama:latest .

@@ -1,11 +1,24 @@
 version: '3'
 
 services:
+  milvus:
+    image: milvus:v2.4.13
+    container_name: milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+      - "2379:2379"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - instalily-net
+
+
   ollama:
-    image: ollama/ollama:latest
+    image: ollama:latest
     container_name: ollama
     volumes:
-      - instalily_ollama:/root/.ollama
+      - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
     command: ["serve"]
@@ -21,24 +34,29 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: mongodb
+    volumes:
+      - mongodb_data:/data/db
     ports:
       - "27017:27017"
     networks:
       - instalily-net
-    volumes:
-      - instalily_volumedb:/data/db
 
   server:
-    image: server
+    image: server:latest
     container_name: server
     ports:
       - "8000:8000"
+    depends_on:
+      - "ollama"
+      - "mongodb"
+      - "milvus"
     networks:
       - instalily-net
 
 volumes:
-  instalily_ollama:
-  instalily_volumedb:
+  milvus_data:
+  ollama_data:
+  mongodb_data:
 
 networks:
   instalily-net:

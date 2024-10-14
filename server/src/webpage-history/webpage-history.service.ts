@@ -3,14 +3,102 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { WebpageHistory, WebpageHistoryDocument } from './webpage-history.schema';
 import { ParsedParts, ParsedPartsDocument } from './parsed-parts.schema';
+import { ConfigService } from '@nestjs/config';
 import * as cheerio from 'cheerio';
+import { MilvusClient, DataType } from '@zilliz/milvus2-sdk-node';
+import * as sanitizeHtml from 'sanitize-html';
+import ollama from 'ollama';
 
 @Injectable()
 export class WebpageHistoryService {
+  private milvusClient: MilvusClient;
+  private collectionName: string;
+  private databaseName: string;
+  private ollama: typeof ollama;
+
   constructor(
     @InjectModel(WebpageHistory.name) private webpageHistoryModel: Model<WebpageHistoryDocument>,
-    @InjectModel(ParsedParts.name) private parsedPartsModel: Model<ParsedPartsDocument>
-  ) {}
+    @InjectModel(ParsedParts.name) private parsedPartsModel: Model<ParsedPartsDocument>,
+    private configService: ConfigService
+  ) {
+    const milvusUrl = this.configService.get<string>('MILVUS_URL') || 'http://localhost:19530';
+    this.milvusClient = new MilvusClient(milvusUrl);
+    this.collectionName = 'webpage_vectors';
+    this.databaseName = 'instalilyDB';
+
+    const ollamaUrl = this.configService.get<string>('OLLAMA_URL') || 'http://localhost:11434';
+    this.ollama = ollama;
+
+    this.initMilvusDatabase().catch(error => {
+      console.error('Failed to initialize Milvus database:', error);
+    });
+  }
+
+  private async initMilvusDatabase(retries = 3): Promise<void> {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const databases = await this.milvusClient.listDatabases();
+        const databaseExists = databases.db_names.some(db => db === this.databaseName);
+        
+        if (!databaseExists) {
+          await this.milvusClient.createDatabase({ db_name: this.databaseName });
+          console.log(`Database ${this.databaseName} created successfully.`);
+        } else {
+          console.log(`Database ${this.databaseName} already exists.`);
+        }
+  
+        await this.milvusClient.useDatabase({ db_name: this.databaseName });
+        console.log(`Using database ${this.databaseName}.`);
+  
+        await this.initMilvusCollection();
+        return;
+      } catch (error) {
+        console.error(`Attempt ${i + 1} to create/use database failed:`, error);
+        if (i === retries - 1) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  private async initMilvusCollection(retries = 3): Promise<void> {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const hasCollection = await this.milvusClient.hasCollection({ collection_name: this.collectionName });
+        if (!hasCollection) {
+          await this.milvusClient.createCollection({
+            collection_name: this.collectionName,
+            fields: [
+              { name: 'id', data_type: DataType.Int64, is_primary_key: true, autoID: true },
+              { name: 'url', data_type: DataType.VarChar, max_length: 65535 },
+              { name: 'vector', data_type: DataType.FloatVector, dim: 1024 }
+            ]
+          });
+          console.log(`Collection ${this.collectionName} created successfully in ${this.databaseName}.`);
+        } else {
+          console.log(`Collection ${this.collectionName} already exists in ${this.databaseName}.`);
+        }
+        return;
+      } catch (error) {
+        console.error(`Attempt ${i + 1} to create collection failed:`, error);
+        if (i === retries - 1) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  private async ensureCollectionExists(): Promise<void> {
+    try {
+      await this.milvusClient.useDatabase({ db_name: this.databaseName });
+      const hasCollection = await this.milvusClient.hasCollection({ collection_name: this.collectionName });
+      if (!hasCollection) {
+        console.log(`Collection ${this.collectionName} not found in ${this.databaseName}, recreating...`);
+        await this.initMilvusCollection();
+      }
+    } catch (error) {
+      console.error('Error checking/recreating collection:', error);
+      throw error;
+    }
+  }
 
   async create(pageUrl: string, product: string, parsedContent: string): Promise<WebpageHistory> {
     return this.webpageHistoryModel.findOneAndUpdate(
@@ -97,5 +185,50 @@ export class WebpageHistoryService {
         },
         { upsert: true, new: true }
       ).exec();
+  }
+
+  async generateVectorPage(pageUrl: string): Promise<Record<string, any> | null> {
+    try {
+      await this.ensureCollectionExists();
+      
+      const webpageContent = await this.webpageHistoryModel.findOne({ pageUrl });
+      
+      if (!webpageContent) {
+        console.error(`No content found for URL: ${pageUrl}`);
+        return null;
+      }
+  
+      const plainText = sanitizeHtml(webpageContent.parsedContent, {
+        allowedTags: [],
+        allowedAttributes: {}
+      });
+  
+      const response = await this.ollama.embeddings({
+        model: 'mxbai-embed-large',
+        prompt: plainText
+      });
+  
+      const embedding = response.embedding;
+  
+      await this.milvusClient.useDatabase({ db_name: this.databaseName });
+  
+      const insertResult = await this.milvusClient.insert({
+        collection_name: this.collectionName,
+        fields_data: [{
+          url: pageUrl,
+          vector: embedding
+        }]
+      });
+  
+      return {
+        url: pageUrl,
+        vectorId: insertResult.IDs[0],
+        embedding: embedding
+      };
+  
+    } catch (error) {
+      console.error('Error in generateVectorPage:', error);
+      return null;
+    }
   }
 }

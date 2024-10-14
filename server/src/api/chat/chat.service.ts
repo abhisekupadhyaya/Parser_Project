@@ -16,6 +16,7 @@ export class ChatService {
   async updateWebpage(chatId: string, pageUrl: string, product: string, parsedContent: string) {
     await this.webpageHistoryService.create(pageUrl, product, parsedContent);
     await this.webpageHistoryService.getProcessedProductInfo(pageUrl);
+    await this.webpageHistoryService.generateVectorPage(pageUrl);
     return this.agentsService.createChat(chatId, pageUrl);
   }
 }
